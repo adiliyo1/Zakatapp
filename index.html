@@ -236,25 +236,15 @@
     <script type="text/babel">
         const { useState, useEffect } = React;
 
-        // Mock Plaid configuration - In production, use your actual Plaid keys
-        const PLAID_CONFIG = {
-            // Replace with your actual Plaid public key
-            publicKey: 'YOUR_PLAID_PUBLIC_KEY',
-            env: 'sandbox', // or 'development', 'production'
-            clientName: 'ZakatEase',
-            product: ['accounts'],
-            onSuccess: function(public_token, metadata) {
-                console.log('Plaid success:', public_token, metadata);
-            },
-            onExit: function(err, metadata) {
-                console.log('Plaid exit:', err, metadata);
-            }
-        };
+        // Backend API configuration
+        const API_BASE_URL = 'http://localhost:3001/api';
+        
+        // Generate a unique user ID for this session
+        const USER_ID = 'user_' + Math.random().toString(36).substr(2, 9);
 
-        // Current gold price (you'd fetch this from an API in production)
-        const CURRENT_GOLD_PRICE_PER_GRAM = 65; // USD
-        const NISAB_GOLD_GRAMS = 87.48; // Islamic standard
-        const NISAB_THRESHOLD = NISAB_GOLD_GRAMS * CURRENT_GOLD_PRICE_PER_GRAM;
+        // These will be fetched from backend
+        const [nisabThreshold, setNisabThreshold] = useState(5737.50); // Default fallback
+        const [goldPrice, setGoldPrice] = useState(65); // Default fallback
         const ZAKAT_RATE = 0.025; // 2.5%
 
         function ZakatCalculator() {
@@ -275,6 +265,8 @@
             });
             const [isPlaidLoading, setIsPlaidLoading] = useState(false);
             const [error, setError] = useState('');
+            const [linkToken, setLinkToken] = useState(null);
+            const [plaidHandler, setPlaidHandler] = useState(null);
 
             // Calculate totals
             const totalAssets = Object.values(manualAssets).reduce((sum, val) => sum + parseFloat(val || 0), 0) +
@@ -283,51 +275,135 @@
             const totalDebts = Object.values(debts).reduce((sum, val) => sum + parseFloat(val || 0), 0);
             const netWorth = totalAssets - totalDebts;
             const zakatableAmount = Math.max(0, netWorth);
-            const zakatOwed = zakatableAmount >= NISAB_THRESHOLD ? zakatableAmount * ZAKAT_RATE : 0;
+            const zakatOwed = zakatableAmount >= nisabThreshold ? zakatableAmount * ZAKAT_RATE : 0;
 
-            // Mock Plaid Link handler
-            const handlePlaidSuccess = (publicToken, metadata) => {
+            // API helper functions
+            const apiCall = async (endpoint, data = {}) => {
+                try {
+                    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(data)
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`API call failed: ${response.statusText}`);
+                    }
+                    
+                    return await response.json();
+                } catch (error) {
+                    console.error('API call error:', error);
+                    throw error;
+                }
+            };
+
+            // Initialize Plaid Link
+            const initializePlaidLink = async () => {
+                try {
+                    const response = await apiCall('/create-link-token', { user_id: USER_ID });
+                    setLinkToken(response.link_token);
+                    
+                    // Initialize Plaid Link with the token
+                    const handler = Plaid.create({
+                        token: response.link_token,
+                        onSuccess: handlePlaidSuccess,
+                        onExit: (err, metadata) => {
+                            if (err) {
+                                setError('Plaid connection cancelled or failed');
+                            }
+                            setIsPlaidLoading(false);
+                        },
+                        onEvent: (eventName, metadata) => {
+                            console.log('Plaid event:', eventName, metadata);
+                        }
+                    });
+                    
+                    setPlaidHandler(handler);
+                } catch (error) {
+                    setError('Failed to initialize Plaid connection');
+                    console.error('Plaid initialization error:', error);
+                }
+            };
+
+            // Handle successful Plaid Link
+            const handlePlaidSuccess = async (publicToken, metadata) => {
                 setIsPlaidLoading(true);
                 setError('');
                 
-                // Mock API call to exchange public token for access token
-                // In production, you'd send this to your backend
-                setTimeout(() => {
-                    // Mock account data
-                    const mockAccounts = [
-                        {
-                            id: '1',
-                            name: 'Chase Checking',
-                            type: 'depository',
-                            subtype: 'checking',
-                            balance: 5250.00
-                        },
-                        {
-                            id: '2',
-                            name: 'Chase Savings',
-                            type: 'depository',
-                            subtype: 'savings',  
-                            balance: 12750.00
-                        },
-                        {
-                            id: '3',
-                            name: 'Robinhood',
-                            type: 'investment',
-                            subtype: 'brokerage',
-                            balance: 8500.00
-                        }
-                    ];
+                try {
+                    // Exchange public token for access token
+                    await apiCall('/exchange-public-token', {
+                        public_token: publicToken,
+                        user_id: USER_ID
+                    });
                     
-                    setConnectedAccounts(mockAccounts);
+                    // Fetch accounts
+                    await fetchAccounts();
+                } catch (error) {
+                    setError('Failed to connect your accounts. Please try again.');
                     setIsPlaidLoading(false);
-                }, 2000);
+                }
+            };
+
+            // Fetch connected accounts
+            const fetchAccounts = async () => {
+                try {
+                    const response = await apiCall('/accounts', { user_id: USER_ID });
+                    setConnectedAccounts(response.accounts || []);
+                    setIsPlaidLoading(false);
+                } catch (error) {
+                    setError('Failed to fetch account data');
+                    setIsPlaidLoading(false);
+                }
             };
 
             const openPlaidLink = () => {
-                // In production, initialize Plaid Link here
-                // For demo purposes, we'll simulate the connection
-                handlePlaidSuccess('mock_public_token', {});
+                if (plaidHandler) {
+                    plaidHandler.open();
+                } else {
+                    setError('Plaid connection not ready. Please refresh the page.');
+                }
             };
+
+            // Calculate Zakat using backend
+            const calculateZakat = async () => {
+                try {
+                    const response = await apiCall('/calculate-zakat', {
+                        user_id: USER_ID,
+                        manual_assets: manualAssets,
+                        debts: debts
+                    });
+                    
+                    if (response.calculation) {
+                        setNisabThreshold(response.calculation.nisab_threshold);
+                        setGoldPrice(response.gold_price);
+                        
+                        // Update connected accounts with fresh data
+                        if (response.calculation.plaid_balance > 0) {
+                            await fetchAccounts();
+                        }
+                    }
+                } catch (error) {
+                    console.error('Zakat calculation error:', error);
+                    // Continue with frontend calculation as fallback
+                }
+            };
+
+            // Initialize Plaid on component mount
+            useEffect(() => {
+                initializePlaidLink();
+            }, []);
+
+            // Recalculate when assets or debts change
+            useEffect(() => {
+                const debounceTimer = setTimeout(() => {
+                    calculateZakat();
+                }, 500); // Debounce API calls
+                
+                return () => clearTimeout(debounceTimer);
+            }, [manualAssets, debts]);
 
             const handleManualAssetChange = (key, value) => {
                 setManualAssets(prev => ({
@@ -513,13 +589,13 @@
                             
                             <div className="summary-item">
                                 <span className="summary-label">Nisab Threshold:</span>
-                                <span className="summary-value">{formatCurrency(NISAB_THRESHOLD)}</span>
+                                <span className="summary-value">{formatCurrency(nisabThreshold)}</span>
                             </div>
 
                             <div className="zakat-total">
                                 <div>Zakat Owed:</div>
                                 <div>{formatCurrency(zakatOwed)}</div>
-                                {zakatOwed === 0 && zakatableAmount < NISAB_THRESHOLD && (
+                                {zakatOwed === 0 && zakatableAmount < nisabThreshold && (
                                     <div style={{fontSize: '0.9rem', marginTop: '10px', opacity: '0.8'}}>
                                         (Below Nisab threshold)
                                     </div>

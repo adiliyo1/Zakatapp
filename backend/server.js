@@ -242,7 +242,7 @@ function isZakatableAccount(account) {
 
 async function getCurrentGoldPrice() {
   // Mock gold price - in production, fetch from a gold price API
-  return 65; // USD per gram
+  return 100; // USD per gram
 }
 
 // Error handling middleware
